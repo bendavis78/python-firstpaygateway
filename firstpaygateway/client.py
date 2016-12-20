@@ -3,6 +3,7 @@ import logging
 import re
 import requests
 from dateutil import tz
+from dateutil.parser import parse as parse_date
 from datetime import date, datetime
 from sys import version_info
 from . import errors
@@ -17,14 +18,30 @@ else:
 
 logger = logging.getLogger(__name__)
 
+ISO_DATETIME_RE = re.compile(r'^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$')
+DATETIME_RE = re.compile(r'^\d{2}\d{2}\d{4} \d{1,2}:\d{2}( ([AaPp]Mm))?$')
+DATE_RE = re.compile(r'^\d{2}\d{2}\d{4}$')
+TIME_RE = re.compile(r'\d{1:2}:\d{2}( ([AP]M))?$')
+TZ_AWARE_FIELDS = ['trans_date_and_time']
+
+def _extract_datetime(value):
+    if not isinstance(value, str):
+        return
+    if ISO_DATETIME_RE.match(value):
+        return parse_date(value)
+    if DATE_RE.match(value):
+        return parse_date(value).date()
+    if TIME_RE.match(value):
+        return parse_date(value).time()
+    return None
 
 def _to_camel_case(s):
     return re.sub(r'(?!^)_([A-z])', lambda m: m.group(1).upper(), s)
 
 
 def _to_lower_underscore(s):
-    return re.sub(
-        r'(?!^)([A-Z])', lambda m: '_' + m.group(1).lower(), s).lower()
+    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', s)
+    return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
 
 
 def _json_default(obj):
@@ -65,8 +82,19 @@ def _get_date_params(prefix, dt):
 
 
 class ResultObject(object):
-    def __init__(self, data):
+    def __init__(self, data, opts):
         self._data = data
+        self._opts = opts
+
+    def _get_date_value(self, attrname, value):
+        date_value = _extract_datetime(value)
+        if date_value:
+            gateway_tz = tz.gettz(self._opts['gateway_tz'])
+            if attrname in TZ_AWARE_FIELDS and gateway_tz:
+                # make timezone aware and convert to UTC
+                date_value = date_value.replace(tzinfo=gateway_tz)
+                date_value = date_value.astimezone(tzinfo=tz.tzutc())
+        return date_value
 
     def __getattr__(self, attr):
         # convert key from lower_underscore to camelCase
@@ -77,18 +105,23 @@ class ResultObject(object):
             key = key[0].upper() + key[1:]
 
         if key not in self._data:
-            raise AttributeError("'{}' object has no attribute {}'".format(
+            raise AttributeError("'{}' object has no attribute {}*'".format(
                 self.__class__.__name__, attr))
 
         value = self._data[key]
+        date_value = self._get_date_value(key, value)
+        if date_value:
+            return date_value
         if type(value) == dict:
-            return ResultObject(value)
+            return ResultObject(value, self._opts)
         if type(value) == list:
-            return [type(o) == dict and ResultObject(o) or o for o in value]
+            return [type(o) == dict and ResultObject(o, self._opts) or o 
+                    for o in value]
         return value
 
     def __setattr__(self, attr, value):
         if not attr.startswith('_'):
+            import ipdb; ipdb.set_trace()
             raise AttributeError("Result attributes are read-only")
         super(ResultObject, self).__setattr__(attr, value)
 
@@ -96,21 +129,24 @@ class ResultObject(object):
         return [_to_lower_underscore(k) for k in self._data.keys()]
 
     def __repr__(self):
-        def change_keys(o):
+        def change_repr(o):
             new = {}
             for key, val in o.items():
+                new_key = _to_lower_underscore(key)
                 if type(val) == dict:
-                    val = change_keys(val)
-                if type(val) == list:
-                    val = [
-                        type(o) == dict and change_keys(o) or o for o in val]
-                new[_to_lower_underscore(key)] = val
+                    val = change_repr(val)
+                elif type(val) == list:
+                    val = [change_repr(o) for o in val]
+                else:
+                    date_val = self._get_date_value(new_key, val).isoformat()
+                    val = date_val or val
+                new[new_key] = val
             return new
-        return _json_dump(change_keys(self._data))
+        return _json_dump(change_repr(self._data))
 
 
 class Result(ResultObject):
-    def __init__(self, response):
+    def __init__(self, response, opts):
         self._raw_response = response
         try:
             data = json.loads(response.text)
@@ -119,16 +155,20 @@ class Result(ResultObject):
                 'isSuccess': False,
                 'errorMessages': [response.text]
             }
-        super(Result, self).__init__(data)
+        super(Result, self).__init__(data, opts)
 
 
 class Client(object):
     VERSION = '1.2.0'
 
-    def __init__(self, merchant_key, processor_id, test_mode=False):
+    def __init__(self, merchant_key, processor_id, gateway_tz=None, 
+                 test_mode=False):
         self.merchant_key = merchant_key
         self.processor_id = processor_id
         self.test_mode = test_mode
+        self.result_opts = {
+            'gateway_tz': gateway_tz
+        }
 
     @property
     def url(self):
@@ -160,7 +200,7 @@ class Client(object):
 
         response = requests.post(url, headers=headers, data=payload)
 
-        result = Result(response)
+        result = Result(response, self.result_opts)
         logger.debug('Gateway Response: ' + response.text)
         if not result.is_success:
             if result.validation_has_failed:
