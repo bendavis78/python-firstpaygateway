@@ -138,8 +138,8 @@ class ResultObject(object):
                 elif type(val) == list:
                     val = [change_repr(o) for o in val]
                 else:
-                    date_val = self._get_date_value(new_key, val).isoformat()
-                    val = date_val or val
+                    date_val = self._get_date_value(new_key, val)
+                    val = date_val and date_val.isoformat() or val
                 new[new_key] = val
             return new
         return _json_dump(change_repr(self._data))
