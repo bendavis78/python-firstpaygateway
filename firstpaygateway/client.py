@@ -18,7 +18,7 @@ else:
 
 logger = logging.getLogger(__name__)
 
-ISO_DATETIME_RE = re.compile(r'^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?)?$')
+ISO_DATETIME_RE = re.compile(r'^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?)?$')
 DATETIME_RE = re.compile(r'^\d{2}\d{2}\d{4} \d{1,2}:\d{2}( ([AaPp]Mm))?$')
 DATE_RE = re.compile(r'^\d{2}\d{2}\d{4}$')
 TIME_RE = re.compile(r'\d{1:2}:\d{2}( ([AP]M))?$')
@@ -108,7 +108,9 @@ class ResultObject(object):
             raise AttributeError("'{}' object has no attribute {}*'".format(
                 self.__class__.__name__, attr))
 
+
         value = self._data[key]
+
         date_value = self._get_date_value(key, value)
         if date_value:
             return date_value
